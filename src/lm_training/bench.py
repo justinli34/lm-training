@@ -122,6 +122,8 @@ def time_trainer(spec: dict, micro: int) -> dict:
         TrainingArguments,
     )
 
+    from .train import SPEED_ARGS
+
     world = int(os.environ.get("WORLD_SIZE", "1"))
     warmup, steps = spec["warmup_steps"], spec["steps"]
 
@@ -151,16 +153,13 @@ def time_trainer(spec: dict, micro: int) -> dict:
             max_steps=warmup + steps,
             learning_rate=1e-4,
             weight_decay=0.1,
-            optim="adamw_torch_fused",
-            bf16=True,
-            tf32=True,
             torch_compile=spec["torch_compile"],
             save_strategy="no",
             report_to="none",
             disable_tqdm=True,
             logging_strategy="no",
             dataloader_num_workers=0,
-            ddp_find_unused_parameters=False,
+            **SPEED_ARGS,
         )
         trainer = Trainer(
             model=_model(spec), args=args, train_dataset=Random(), callbacks=[timer]

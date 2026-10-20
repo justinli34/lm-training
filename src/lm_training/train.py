@@ -13,6 +13,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
@@ -32,6 +33,23 @@ from .planner import utilization
 
 # Written last into each checkpoint, so it also shows that the checkpoint is complete.
 CLOCK_FILE = "budget.json"
+# With several GPUs, the ranks agree on elapsed time about this often. Each agreement
+# makes the CPU wait for the GPU, so doing it every step would stall the GPU.
+CLOCK_SYNC_SECONDS = 5
+
+# TrainingArguments that affect speed. bench.py uses them too, so the planner measures
+# the throughput that training will get.
+SPEED_ARGS: dict[str, Any] = {
+    "optim": "adamw_torch_fused",
+    "bf16": True,
+    "tf32": True,
+    "ddp_find_unused_parameters": False,
+    # Checking each micro-batch's loss for NaN makes the CPU wait for the GPU to finish it.
+    "logging_nan_inf_filter": False,
+    # Every block is full with no masked labels, so all ranks count the same tokens and
+    # the per-step gather that averages the count across GPUs changes nothing.
+    "average_tokens_across_devices": False,
+}
 
 
 class Clock:
@@ -102,17 +120,31 @@ class BudgetCallback(TrainerCallback):
     def __init__(self, clock: Clock, cfg: config.Training, plan: dict):
         self.clock, self.cfg, self.plan = clock, cfg, plan
         self.final_eval_loss = None
+        self.distributed = (
+            torch.distributed.is_available() and torch.distributed.is_initialized()
+        )
+        # Between syncs the clock stands still, so every rank sees the same clock, and
+        # with it the same learning rate.
+        self.sync_every = (
+            max(1, round(CLOCK_SYNC_SECONDS / plan["training"]["step_seconds"]))
+            if self.distributed
+            else 1
+        )
 
     def on_train_begin(self, args, state, control, **kwargs):
         self.mark = time.perf_counter()
+        self.unsynced = 0.0
         self.last_save = self.last_eval = self.clock.elapsed
         self.log_step, self.log_elapsed = state.global_step, self.clock.elapsed
 
     def on_step_end(self, args, state, control, **kwargs):
         now = time.perf_counter()
-        dt = now - self.mark
+        self.unsynced += now - self.mark
         self.mark = now
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
+        if state.global_step % self.sync_every:
+            return
+        dt, self.unsynced = self.unsynced, 0.0
+        if self.distributed:
             t = torch.tensor([dt], device="cuda")
             # Every rank must agree on the elapsed time, or they won't stop together.
             torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MAX)
@@ -153,8 +185,10 @@ class BudgetCallback(TrainerCallback):
         if "loss" not in logs:
             return
         steps = state.global_step - self.log_step
-        seconds = self.clock.elapsed - self.log_elapsed
-        self.log_step, self.log_elapsed = state.global_step, self.clock.elapsed
+        # This rank's own time, which includes steps the clock hasn't synced yet.
+        elapsed = self.clock.elapsed + self.unsynced
+        seconds = elapsed - self.log_elapsed
+        self.log_step, self.log_elapsed = state.global_step, elapsed
         tps = (
             steps * self.plan["training"]["batch_tokens"] / seconds
             if seconds > 0
@@ -229,9 +263,6 @@ def main(run_dir: Path, data_dir: Path, jit_checkpoint: bool = False) -> None:
         adam_beta2=t.adam_beta2,
         adam_epsilon=t.adam_epsilon,
         max_grad_norm=t.max_grad_norm,
-        optim="adamw_torch_fused",
-        bf16=True,
-        tf32=True,
         torch_compile=p["torch_compile"],
         save_strategy="no",  # BudgetCallback schedules checkpoints by training time,
         eval_strategy="no",  # and evals too
@@ -244,9 +275,9 @@ def main(run_dir: Path, data_dir: Path, jit_checkpoint: bool = False) -> None:
         disable_tqdm=True,
         dataloader_num_workers=t.dataloader_workers,
         dataloader_pin_memory=True,
-        ddp_find_unused_parameters=False,
         enable_jit_checkpoint=jit_checkpoint,
         seed=t.seed,
+        **SPEED_ARGS,
     )
     callback = BudgetCallback(clock, t, plan)
     model = LlamaForCausalLM(model_config)

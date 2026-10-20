@@ -20,6 +20,7 @@ uv run lmt train 8 --yes            # same, without asking
 uv run lmt plan 8                   # measure and show the plan only
 uv run lmt prepare --tokens 2e9     # train the tokenizer and tokenize ahead of time
 uv run lmt resume <run name>        # continue a run from its last checkpoint
+uv run lmt generate <run name>      # type prompts for the model to continue, each one fresh
 uv run lmt train 8 --backend modal --gpu "H100!:4"   # run on Modal (see below)
 ```
 

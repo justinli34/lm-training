@@ -5,6 +5,7 @@ lmt train 8 --yes            the same, but start without asking
 lmt plan 8                   measure and show the plan only
 lmt prepare [--tokens N]     train the tokenizer here, and optionally tokenize N tokens
 lmt resume NAME              continue a run from its last checkpoint
+lmt generate NAME            continue prompts with a finished run's model
 """
 
 import argparse
@@ -58,6 +59,18 @@ def cmd_resume(args, cfg):
     backend = backends.make(cfg, args.backend, detach=args.detach)
     with backend.session():
         backend.resume(args.name)
+
+
+def cmd_generate(args, cfg):
+    # Imported here so other commands don't pay for loading transformers.
+    from .generate import loop
+
+    loop(
+        cfg.runs_dir / args.name / "model",
+        args.max_new_tokens,
+        args.temperature,
+        args.top_p,
+    )
 
 
 def main() -> None:
@@ -125,6 +138,17 @@ def main() -> None:
     p.add_argument("--backend", choices=["local", "modal"])
     p.add_argument("--detach", action="store_true")
     p.set_defaults(func=cmd_resume)
+
+    p = sub.add_parser(
+        "generate", help="continue prompts with a run's model, each one fresh"
+    )
+    p.add_argument("name")
+    p.add_argument("--max-new-tokens", type=int, default=200)
+    p.add_argument(
+        "--temperature", type=float, default=0.8, help="0 for greedy decoding"
+    )
+    p.add_argument("--top-p", type=float, default=0.95)
+    p.set_defaults(func=cmd_generate)
 
     args = parser.parse_args()
     args.func(args, config.load(args.config))

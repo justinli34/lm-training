@@ -95,7 +95,9 @@ uv run lmt train 8 --backend modal --gpu "H100!:4"
 - **Detach.** With `--detach`, training keeps going if you close the terminal. Follow it
   with `modal app logs lm-training`.
 - **Getting the model.** Download it with
-  `modal volume get lm-training runs/<run>/model ./runs/<run>/model`.
+  `modal volume get lm-training runs/<run>/model ./runs/<run>`, which creates
+  `./runs/<run>/model/`. The local `./runs/<run>` folder must already exist; if it
+  doesn't, Modal writes every file over a single file at that path.
 
 Pin the GPU type: a plain `H100` may be upgraded to an H200, which would no longer match
 the benchmark. `H100!` prevents this.

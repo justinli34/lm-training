@@ -174,8 +174,11 @@ class ModalBackend:
             )
         call.get()
         runs = self._remote_path(self.cfg.runs_dir / name)
+        # `modal volume get` only nests a remote directory under a local one that
+        # already exists; otherwise it writes every file over the same path.
+        (self.cfg.runs_dir / name).mkdir(parents=True, exist_ok=True)
         print(
-            f"Download the model with: modal volume get {m.volume} {runs}/model ./{runs}/model"
+            f"Download the model with: modal volume get {m.volume} {runs}/model ./{runs}"
         )
 
     def train(self, name: str, plan: dict) -> None:

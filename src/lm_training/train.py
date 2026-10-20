@@ -60,9 +60,9 @@ def wsd_schedule(cfg: config.Training, warmup_steps: int, clock: Clock):
 
 
 class BudgetTrainer(Trainer):
-    def __init__(self, *args, schedule, **kwargs):
+    def __init__(self, *args, schedule, clock: Clock, **kwargs):
         super().__init__(*args, **kwargs)
-        self.schedule = schedule
+        self.schedule, self.clock = schedule, clock
 
     def create_scheduler(self, num_training_steps: int, optimizer=None):
         if self.lr_scheduler is None:
@@ -72,6 +72,20 @@ class BudgetTrainer(Trainer):
             )
             self.lr_scheduler = LambdaLR(optimizer, self.schedule)
         return self.lr_scheduler
+
+    def _save_checkpoint(self, model, trial):
+        # Every save passes through here, including the SIGTERM checkpoint, which
+        # skips on_save. The clock file goes in last to mark the checkpoint complete.
+        ckpt = (
+            Path(self._get_output_dir(trial=trial))
+            / f"checkpoint-{self.state.global_step}"
+        )
+        if self.is_world_process_zero():
+            # A save can overwrite a checkpoint of the same step; it's incomplete until done.
+            (ckpt / CLOCK_FILE).unlink(missing_ok=True)
+        super()._save_checkpoint(model, trial)
+        if self.is_world_process_zero():
+            (ckpt / CLOCK_FILE).write_text(json.dumps({"elapsed": self.clock.elapsed}))
 
 
 def _hms(seconds: float) -> str:
@@ -125,9 +139,6 @@ class BudgetCallback(TrainerCallback):
     def on_save(self, args, state, control, **kwargs):
         self.mark = time.perf_counter()
         self.last_save = self.clock.elapsed
-        if state.is_world_process_zero:
-            ckpt = Path(args.output_dir) / f"checkpoint-{state.global_step}"
-            (ckpt / CLOCK_FILE).write_text(json.dumps({"elapsed": self.clock.elapsed}))
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not state.is_world_process_zero or not logs:
@@ -248,6 +259,7 @@ def main(run_dir: Path, data_dir: Path, jit_checkpoint: bool = False) -> None:
         processing_class=tokenizer,
         callbacks=[callback],
         schedule=wsd_schedule(t, p["warmup_steps"], clock),
+        clock=clock,
     )
     trainer.remove_callback(PrinterCallback)
 
@@ -257,6 +269,17 @@ def main(run_dir: Path, data_dir: Path, jit_checkpoint: bool = False) -> None:
             flush=True,
         )
     trainer.train(resume_from_checkpoint=str(resume[0]) if resume else None)
+
+    # The SIGTERM checkpoint also ends train() normally, with budget left. That run
+    # isn't finished: exit with an error so Modal retries it from the checkpoint.
+    if clock.elapsed < clock.budget and trainer.state.global_step < max_steps:
+        if trainer.is_world_process_zero():
+            print(
+                f"Stopped at {_hms(clock.elapsed)} of {_hms(clock.budget)}; "
+                "resuming continues from the last checkpoint",
+                flush=True,
+            )
+        sys.exit(1)
 
     trainer.save_model(str(run_dir / "model"))
     if trainer.is_world_process_zero():

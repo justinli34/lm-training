@@ -1,0 +1,39 @@
+[project]
+name = "lm-training"
+version = "0.1.0"
+description = "Train a Llama-style language model from a single number: the GPU-hour budget."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "torch>=2.9",
+    "transformers>=5.0",
+    "tokenizers>=0.22",
+    "datasets>=4.0",
+    "accelerate>=1.10",
+    "numpy>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+modal = ["modal>=1.3"]
+
+[project.scripts]
+lmt = "lm_training.cli:main"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.1",
+    "ty>=0.0.89",
+]
